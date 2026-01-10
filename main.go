@@ -61,7 +61,8 @@ type GraphQLResponse struct {
 func main() {
 	printBanner()
 
-	flag.StringVar(&targetURL, "t", "", "Target URL")
+    // CHANGED: -t is now -u
+	flag.StringVar(&targetURL, "u", "", "Target URL") 
 	flag.StringVar(&proxyURL, "x", "", "Proxy URL")
 	flag.StringVar(&headersRaw, "H", "", "Custom Headers")
 	flag.IntVar(&concurrency, "c", 10, "Concurrency")
@@ -70,7 +71,7 @@ func main() {
 	flag.Parse()
 
 	if targetURL == "" {
-		fmt.Printf("%s[-] Target URL is required.%s\n", ColorRed, ColorReset)
+		fmt.Printf("%s[-] Target URL is required. Use -u <url>%s\n", ColorRed, ColorReset)
 		os.Exit(1)
 	}
 
