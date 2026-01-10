@@ -174,7 +174,7 @@ func printBanner() {
                   |_|   
 `
 	fmt.Printf("%s%s%s", ColorPink, banner, ColorReset)
-	fmt.Printf("%s    GraphQLSuite (v3.1 Live Exploit)%s\n\n", ColorPink, ColorReset)
+	fmt.Printf("%s    GraphQLSuite (by Spidersec)%s\n\n", ColorPink, ColorReset)
 }
 
 func setupClient() {
