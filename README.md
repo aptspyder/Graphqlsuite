@@ -19,7 +19,7 @@ If a vulnerability is found, GraphQLSuite generates the exact `curl` command nee
 
 
 ```
-go install [github.com/aptspider/Graphqlsuite/v2@v2.1.5](https://github.com/aptspider/Graphqlsuite/v2@v2.1.5)
+go install [github.com/aptspider/Graphqlsuite/v2@v2.1.5
 ````
 ## Usage 
 
