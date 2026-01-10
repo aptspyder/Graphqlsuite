@@ -107,7 +107,7 @@ func main() {
 		CheckMalformJSON,
 	}
 
-	fmt.Printf("%s[*] Starting scan with %d checks...%s\n\n", ColorBlue, len(checks), ColorReset)
+	fmt.Printf("%s[*] Starting scan with %d checks (Strict Mode)...%s\n\n", ColorBlue, len(checks), ColorReset)
 
 	// 6. Worker Pool & Execution
 	results := make(chan Result, len(checks))
@@ -173,7 +173,7 @@ func printBanner() {
                   |_|   
 `
 	fmt.Printf("%s%s%s", ColorPink, banner, ColorReset)
-	fmt.Printf("%s    GraphQLSuite by SpiderSec%s\n\n", ColorPink, ColorReset)
+	fmt.Printf("%s    GraphQLSuite by SpiderSec (v2.2 Strict)%s\n\n", ColorPink, ColorReset)
 }
 
 func setupClient() {
@@ -213,7 +213,7 @@ func sendRequest(method, urlStr, contentType string, body io.Reader) (*http.Resp
 	}
 
 	// Default Headers
-	req.Header.Set("User-Agent", "GraphQLSuite/1.0 (SpiderSec)")
+	req.Header.Set("User-Agent", "GraphQLSuite/2.2 (SpiderSec)")
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
@@ -242,6 +242,12 @@ func detectGraphQL(urlStr string) bool {
 	return resp.StatusCode == 200 && strings.Contains(body, "__typename")
 }
 
+// isSuccessfulGraphQL checks if the response is a valid execution.
+// It returns TRUE if "data" is present AND "errors" is missing.
+func isSuccessfulGraphQL(body string) bool {
+	return strings.Contains(body, `"data"`) && !strings.Contains(body, `"errors"`) && !strings.Contains(body, "<html")
+}
+
 // --- VULNERABILITY CHECKS ---
 
 // 1. Introspection
@@ -249,7 +255,7 @@ func CheckIntrospection(urlStr string) Result {
 	payload := `{"query":"query { __schema { queryType { name } } }"}`
 	_, body, err := sendRequest("POST", urlStr, "application/json", bytes.NewBufferString(payload))
 	
-	if err == nil && strings.Contains(body, "__schema") {
+	if err == nil && strings.Contains(body, "__schema") && !strings.Contains(body, "Schema is disabled") {
 		return Result{Name: "Introspection Enabled", Vulnerable: true, Severity: "LOW", Description: "Full schema discovery possible.", Payload: payload}
 	}
 	return Result{Name: "Introspection Enabled", Vulnerable: false}
@@ -266,10 +272,11 @@ func CheckAliasOverloading(urlStr string) Result {
 	payload := fmt.Sprintf(`{"query":"%s"}`, b.String())
 
 	start := time.Now()
-	resp, _, err := sendRequest("POST", urlStr, "application/json", bytes.NewBufferString(payload))
+	resp, body, err := sendRequest("POST", urlStr, "application/json", bytes.NewBufferString(payload))
 	duration := time.Since(start)
 
-	if err == nil && resp.StatusCode == 200 && duration > 2*time.Second {
+	// Must be slow (>2s) AND Successful (no errors)
+	if err == nil && resp.StatusCode == 200 && duration > 2*time.Second && isSuccessfulGraphQL(body) {
 		return Result{Name: "Alias Overloading (DoS)", Vulnerable: true, Severity: "HIGH", Description: "Server processed 150+ aliases, causing delay.", Payload: "Big Alias Query"}
 	}
 	return Result{Name: "Alias Overloading (DoS)", Vulnerable: false}
@@ -282,6 +289,7 @@ func CheckBatchQuery(urlStr string) Result {
 
 	_, body, err := sendRequest("POST", urlStr, "application/json", bytes.NewBufferString(payload))
 	
+	// Must return a JSON Array (which implies it executed all of them)
 	if err == nil && strings.HasPrefix(strings.TrimSpace(body), "[") {
 		return Result{Name: "Batch Queries", Vulnerable: true, Severity: "HIGH", Description: "Batching enabled. Can be used for DoS or Brute Force.", Payload: payload}
 	}
@@ -293,9 +301,11 @@ func CheckDirectiveOverloading(urlStr string) Result {
 	directives := strings.Repeat("@skip(if: false) ", 100)
 	payload := fmt.Sprintf(`{"query":"query { __typename %s }"}`, directives)
 
-	resp, _, err := sendRequest("POST", urlStr, "application/json", bytes.NewBufferString(payload))
-	if err == nil && resp.StatusCode == 200 {
-		return Result{Name: "Directive Overloading", Vulnerable: true, Severity: "MEDIUM", Description: "Server accepts high number of directives.", Payload: payload}
+	resp, body, err := sendRequest("POST", urlStr, "application/json", bytes.NewBufferString(payload))
+	
+	// Vulnerable only if server executes it without error
+	if err == nil && resp.StatusCode == 200 && isSuccessfulGraphQL(body) {
+		return Result{Name: "Directive Overloading", Vulnerable: true, Severity: "MEDIUM", Description: "Server accepts high number of directives without error.", Payload: payload}
 	}
 	return Result{Name: "Directive Overloading", Vulnerable: false}
 }
@@ -306,10 +316,11 @@ func CheckFieldDuplication(urlStr string) Result {
 	payload := fmt.Sprintf(`{"query":"query { %s }"}`, fields)
 
 	start := time.Now()
-	resp, _, err := sendRequest("POST", urlStr, "application/json", bytes.NewBufferString(payload))
+	resp, body, err := sendRequest("POST", urlStr, "application/json", bytes.NewBufferString(payload))
 	duration := time.Since(start)
 
-	if err == nil && resp.StatusCode == 200 && duration > 1*time.Second {
+	// Vulnerable only if it took time AND executed (didn't return "Duplicate field" error)
+	if err == nil && resp.StatusCode == 200 && duration > 1*time.Second && isSuccessfulGraphQL(body) {
 		return Result{Name: "Field Duplication", Vulnerable: true, Severity: "MEDIUM", Description: "Server processed 500 duplicate fields.", Payload: "Repeated __typename"}
 	}
 	return Result{Name: "Field Duplication", Vulnerable: false}
@@ -321,9 +332,11 @@ func CheckCircularIntrospection(urlStr string) Result {
 	q := `query { __schema { types { fields { type { fields { type { fields { type { name } } } } } } } } }`
 	payload := fmt.Sprintf(`{"query":"%s"}`, q)
 	
-	resp, _, err := sendRequest("POST", urlStr, "application/json", bytes.NewBufferString(payload))
-	if err == nil && resp.StatusCode == 200 {
-		return Result{Name: "Circular Introspection", Vulnerable: true, Severity: "HIGH", Description: "Deeply nested introspection allowed.", Payload: q}
+	resp, body, err := sendRequest("POST", urlStr, "application/json", bytes.NewBufferString(payload))
+	
+	// Vulnerable ONLY if it returns "data" and NO "errors" (meaning depth check failed)
+	if err == nil && resp.StatusCode == 200 && isSuccessfulGraphQL(body) {
+		return Result{Name: "Circular Introspection", Vulnerable: true, Severity: "HIGH", Description: "Deeply nested introspection executed without error.", Payload: q}
 	}
 	return Result{Name: "Circular Introspection", Vulnerable: false}
 }
@@ -335,8 +348,10 @@ func CheckCSRF_GET(urlStr string) Result {
 	q.Set("query", "query { __typename }")
 	u.RawQuery = q.Encode()
 
-	resp, _, err := sendRequest("GET", u.String(), "", nil)
-	if err == nil && resp.StatusCode == 200 {
+	resp, body, err := sendRequest("GET", u.String(), "", nil)
+	
+	// Vulnerable only if it returns GraphQL DATA via GET
+	if err == nil && resp.StatusCode == 200 && isSuccessfulGraphQL(body) {
 		return Result{Name: "CSRF (GET Based)", Vulnerable: true, Severity: "MEDIUM", Description: "API accepts queries via GET, vulnerable to CSRF.", Payload: u.String()}
 	}
 	return Result{Name: "CSRF (GET Based)", Vulnerable: false}
@@ -346,12 +361,15 @@ func CheckCSRF_GET(urlStr string) Result {
 func CheckMutationOverGET(urlStr string) Result {
 	u, _ := url.Parse(urlStr)
 	q := u.Query()
+	// Using a harmless mutation attempts
 	q.Set("query", "mutation { __typename }") 
 	u.RawQuery = q.Encode()
 
 	resp, body, err := sendRequest("GET", u.String(), "", nil)
 	
-	if err == nil && resp.StatusCode == 200 && !strings.Contains(body, "must be POST") {
+	// Vulnerable only if it executes (returns data)
+	// If it returns "Mutation not allowed in GET", it is safe.
+	if err == nil && resp.StatusCode == 200 && isSuccessfulGraphQL(body) {
 		return Result{Name: "Mutation over GET", Vulnerable: true, Severity: "HIGH", Description: "API processed 'mutation' keyword via GET.", Payload: u.String()}
 	}
 	return Result{Name: "Mutation over GET", Vulnerable: false}
@@ -362,8 +380,9 @@ func CheckCSRF_POST_UrlEncoded(urlStr string) Result {
 	data := url.Values{}
 	data.Set("query", "query { __typename }")
 	
-	resp, _, err := sendRequest("POST", urlStr, "application/x-www-form-urlencoded", strings.NewReader(data.Encode()))
-	if err == nil && resp.StatusCode == 200 {
+	resp, body, err := sendRequest("POST", urlStr, "application/x-www-form-urlencoded", strings.NewReader(data.Encode()))
+	
+	if err == nil && resp.StatusCode == 200 && isSuccessfulGraphQL(body) {
 		return Result{Name: "CSRF (POST UrlEncoded)", Vulnerable: true, Severity: "MEDIUM", Description: "API accepts x-www-form-urlencoded.", Payload: data.Encode()}
 	}
 	return Result{Name: "CSRF (POST UrlEncoded)", Vulnerable: false}
@@ -372,9 +391,9 @@ func CheckCSRF_POST_UrlEncoded(urlStr string) Result {
 // 10. CSRF via Text/Plain (Bypass Preflight)
 func CheckCSRF_POST_TextPlain(urlStr string) Result {
 	payload := `{"query":"query { __typename }"}`
-	resp, _, err := sendRequest("POST", urlStr, "text/plain", bytes.NewBufferString(payload))
+	resp, body, err := sendRequest("POST", urlStr, "text/plain", bytes.NewBufferString(payload))
 	
-	if err == nil && resp.StatusCode == 200 {
+	if err == nil && resp.StatusCode == 200 && isSuccessfulGraphQL(body) {
 		return Result{Name: "CSRF (Text/Plain)", Vulnerable: true, Severity: "HIGH", Description: "API accepts text/plain Content-Type.", Payload: payload}
 	}
 	return Result{Name: "CSRF (Text/Plain)", Vulnerable: false}
@@ -432,8 +451,8 @@ func CheckDebugMode(urlStr string) Result {
 func CheckMethodNotAllowed(urlStr string) Result {
 	payload := `{"query":"query { __typename }"}`
 	for _, method := range []string{"PUT", "DELETE"} {
-		resp, _, _ := sendRequest(method, urlStr, "application/json", bytes.NewBufferString(payload))
-		if resp != nil && resp.StatusCode == 200 {
+		resp, body, _ := sendRequest(method, urlStr, "application/json", bytes.NewBufferString(payload))
+		if resp != nil && resp.StatusCode == 200 && isSuccessfulGraphQL(body) {
 			return Result{Name: "HTTP Method Override", Vulnerable: true, Severity: "LOW", Description: method + " request executed query.", Payload: method}
 		}
 	}
@@ -446,8 +465,10 @@ func CheckDeepNesting(urlStr string) Result {
 	payload := fmt.Sprintf(`{"query":"query %s"}`, nest)
 	
 	resp, body, err := sendRequest("POST", urlStr, "application/json", bytes.NewBufferString(payload))
+	// Vulnerable only if execution proceeds (server tries to resolve 'a' at depth 50)
+	// If response contains "Max depth exceeded", it's safe.
 	if err == nil && resp.StatusCode == 200 {
-		if strings.Contains(body, "Cannot query field") {
+		if strings.Contains(body, "Cannot query field") && !strings.Contains(body, "depth") {
 			return Result{Name: "Deep Nesting allowed", Vulnerable: true, Severity: "MEDIUM", Description: "Server parsed 50+ nested levels.", Payload: "50x Nested Query"}
 		}
 	}
